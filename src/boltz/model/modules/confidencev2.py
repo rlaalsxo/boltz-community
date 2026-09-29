@@ -17,6 +17,9 @@ from boltz.model.modules.trunkv2 import (
 from boltz.model.modules.utils import LinearNoBias
 
 
+_SEQUENTIAL_INFERENCE_DROPPED_KEYS = ("pae_logits", "pde_logits")
+
+
 def _concat_confidence_outputs(out_dicts):
     """Concatenate sequential confidence outputs, preserving nested dicts."""
     first = out_dicts[0]
@@ -133,19 +136,26 @@ class ConfidenceModule(nn.Module):
             assert z.shape[0] == 1, "Not supported with batch size > 1"
             out_dicts = []
             for sample_idx in range(multiplicity):
-                out_dicts.append(  # noqa: PERF401
-                    self.forward(
-                        s_inputs,
-                        s,
-                        z,
-                        x_pred[sample_idx : sample_idx + 1],
-                        feats,
-                        pred_distogram_logits,
-                        multiplicity=1,
-                        run_sequentially=False,
-                        use_kernels=use_kernels,
-                    )
+                sample_out = self.forward(
+                    s_inputs,
+                    s,
+                    z,
+                    x_pred[sample_idx : sample_idx + 1],
+                    feats,
+                    pred_distogram_logits,
+                    multiplicity=1,
+                    run_sequentially=False,
+                    use_kernels=use_kernels,
                 )
+                if not self.training:
+                    # The N x N x bins logits are only consumed by the training
+                    # loss; ptm/iptm are already computed inside the per-sample
+                    # forward. Holding them for every sample until the final
+                    # concat made VRAM spike after diffusion had finished, so
+                    # large inputs OOM'd at the very end and lost all samples.
+                    for key in _SEQUENTIAL_INFERENCE_DROPPED_KEYS:
+                        sample_out.pop(key, None)
+                out_dicts.append(sample_out)
 
             return _concat_confidence_outputs(out_dicts)
 
