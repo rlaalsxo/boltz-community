@@ -1,4 +1,5 @@
 import gc
+import traceback
 from typing import Any, Optional
 
 import numpy as np
@@ -24,7 +25,7 @@ from boltz.model.modules.confidencev2 import ConfidenceModule
 from boltz.model.modules.diffusion_conditioning import DiffusionConditioning
 from boltz.model.modules.diffusionv2 import AtomDiffusion
 from boltz.model.modules.encodersv2 import RelativePositionEncoder
-from boltz.model.modules.utils import autocast_device_type
+from boltz.model.modules.utils import autocast_device_type, log_cuda_memory
 from boltz.model.modules.trunkv2 import (
     BFactorModule,
     ContactConditioning,
@@ -507,6 +508,8 @@ class Boltz2(LightningModule):
                 "s": s,
                 "z": z,
             }
+            if not self.training:
+                log_cuda_memory("trunk done")
 
             if (
                 self.run_trunk_and_structure
@@ -555,6 +558,8 @@ class Boltz2(LightningModule):
                         diffusion_conditioning=diffusion_conditioning,
                     )
                     dict_out.update(struct_out)
+                if not self.training:
+                    log_cuda_memory("diffusion done")
 
                 if self.predict_bfactor:
                     pbfactor = self.bfactor_module(s)
@@ -618,6 +623,8 @@ class Boltz2(LightningModule):
                     use_kernels=self.use_kernels,
                 )
             )
+            if not self.training:
+                log_cuda_memory("confidence done")
 
         if self.affinity_prediction:
             pad_token_mask = feats["token_pad_mask"][0]
@@ -1145,6 +1152,10 @@ class Boltz2(LightningModule):
         except RuntimeError as e:  # catch out of memory exceptions
             if "out of memory" in str(e):
                 print("| WARNING: ran out of memory, skipping batch")
+                # The OOM is swallowed so remaining inputs can run; print where
+                # it happened, otherwise a long run fails with no location.
+                print(traceback.format_exc(), flush=True)
+                log_cuda_memory("out of memory")
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 elif torch.backends.mps.is_available():

@@ -295,6 +295,69 @@ class TestUnionContactPotential:
             pot.compute(coords, feats, {"union_lambda": 0.3})
 
 
+class TestSampleChunking:
+    """sample_chunk_size must bound memory without changing results."""
+
+    NUM_SAMPLES = 5
+    CHUNK_SIZE = 2
+
+    @staticmethod
+    def _coords():
+        torch.manual_seed(0)
+        return torch.randn(TestSampleChunking.NUM_SAMPLES, 4, 3) * 5.0
+
+    @staticmethod
+    def _contact_feats():
+        return {
+            "contact_pair_index": torch.tensor([[[0, 2], [1, 3]]]),
+            "contact_union_index": torch.tensor([[0, 0]]),
+            "contact_negation_mask": torch.tensor([[True, True]]),
+            "contact_thresholds": torch.tensor([[1.0, 1.0]]),
+        }
+
+    @pytest.mark.parametrize(
+        ("potential", "feats", "params"),
+        [
+            (
+                ConnectionsPotential(),
+                {"connected_atom_index": torch.tensor([[[0, 1], [2, 3]]])},
+                {"buffer": 0.5},
+            ),
+            (ContactPotentital(), None, {"union_lambda": 0.3}),
+        ],
+    )
+    def test_chunked_matches_unchunked(self, potential, feats, params):
+        feats = feats if feats is not None else self._contact_feats()
+        coords = self._coords()
+
+        energy = potential.compute(coords, feats, params)
+        energy_chunked = potential.compute(
+            coords, feats, params, sample_chunk_size=self.CHUNK_SIZE
+        )
+        grad = potential.compute_gradient(coords, feats, params)
+        grad_chunked = potential.compute_gradient(
+            coords, feats, params, sample_chunk_size=self.CHUNK_SIZE
+        )
+
+        assert energy.shape == (self.NUM_SAMPLES,)
+        assert torch.allclose(energy, energy_chunked)
+        assert grad.shape == coords.shape
+        assert torch.allclose(grad, grad_chunked)
+
+    def test_chunks_never_exceed_chunk_size(self):
+        from boltz.model.potentials.potentials import _map_sample_chunks
+
+        seen_sizes = []
+
+        def record(chunk):
+            seen_sizes.append(chunk.shape[0])
+            return chunk.sum(dim=(-1, -2))
+
+        _map_sample_chunks(record, self._coords(), self.CHUNK_SIZE)
+
+        assert seen_sizes == [2, 2, 1]
+
+
 class TestBfloat16Potential:
     """FlatBottomPotential must work with bfloat16 inputs on CPU.
 

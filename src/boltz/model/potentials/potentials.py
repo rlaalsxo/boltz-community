@@ -48,6 +48,22 @@ def _stable_union_weights(
     return exp_energy / group_sum.gather(-1, union_index)
 
 
+def _map_sample_chunks(fn, coords, sample_chunk_size):
+    """Apply ``fn`` to slices of the leading (sample) dimension and concatenate.
+
+    Every potential is evaluated independently per sample, so chunking only
+    bounds peak memory and gives the same result as a single call. Without it,
+    pairwise potentials such as VDWOverlapPotential (all inter-chain atom
+    pairs) are materialised for every sample and steering particle at once,
+    which ignores --max_parallel_samples and OOMs on large complexes.
+    """
+    if sample_chunk_size is None or coords.shape[0] <= sample_chunk_size:
+        return fn(coords)
+    return torch.cat(
+        [fn(chunk) for chunk in coords.split(sample_chunk_size, dim=0)], dim=0
+    )
+
+
 class Potential(ABC):
     def __init__(
         self,
@@ -57,14 +73,20 @@ class Potential(ABC):
     ):
         self.parameters = parameters
 
-    def compute(self, coords, feats, parameters):
-        index, args, com_args, ref_args, operator_args = self.compute_args(
-            feats, parameters
-        )
-
-        if index.shape[1] == 0:
+    def compute(self, coords, feats, parameters, sample_chunk_size=None):
+        potential_args = self.compute_args(feats, parameters)
+        if potential_args[0].shape[1] == 0:
             return torch.zeros(coords.shape[:-2], device=coords.device)
 
+        return _map_sample_chunks(
+            lambda chunk: self._compute_energy(chunk, parameters, *potential_args),
+            coords,
+            sample_chunk_size,
+        )
+
+    def _compute_energy(
+        self, coords, parameters, index, args, com_args, ref_args, operator_args
+    ):
         if com_args is not None:
             com_index, atom_pad_mask = com_args
             unpad_com_index = com_index[atom_pad_mask]
@@ -119,13 +141,22 @@ class Potential(ABC):
 
         return energy.sum(dim=tuple(range(1, energy.dim())))
 
-    def compute_gradient(self, coords, feats, parameters):
-        index, args, com_args, ref_args, operator_args = self.compute_args(
-            feats, parameters
-        )
-        if index.shape[1] == 0:
+    def compute_gradient(self, coords, feats, parameters, sample_chunk_size=None):
+        potential_args = self.compute_args(feats, parameters)
+        if potential_args[0].shape[1] == 0:
             return torch.zeros_like(coords)
 
+        return _map_sample_chunks(
+            lambda chunk: self._compute_energy_gradient(
+                chunk, parameters, *potential_args
+            ),
+            coords,
+            sample_chunk_size,
+        )
+
+    def _compute_energy_gradient(
+        self, coords, parameters, index, args, com_args, ref_args, operator_args
+    ):
         if com_args is not None:
             com_index, atom_pad_mask = com_args
             unpad_coords = coords[..., atom_pad_mask, :]

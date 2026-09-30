@@ -32,8 +32,13 @@ from boltz.model.modules.utils import (
     compute_random_augmentation,
     default,
     log,
+    log_cuda_memory,
 )
 from boltz.model.potentials.potentials import get_potentials
+
+# Emit a memory snapshot every N diffusion steps so an OOM can be tied to a step
+# (steering potentials switch on part-way through sampling).
+_MEMORY_LOG_STEP_INTERVAL = 10
 
 
 def _get_sample_id_chunks(
@@ -402,6 +407,11 @@ class AtomDiffusion(Module):
 
         # gradually denoise
         for step_idx, (sigma_tm, sigma_t, gamma) in enumerate(sigmas_and_gammas):
+            if not self.training and step_idx % _MEMORY_LOG_STEP_INTERVAL == 0:
+                log_cuda_memory(
+                    f"diffusion step {step_idx}/{num_sampling_steps} "
+                    f"({total_samples} samples incl. steering particles)"
+                )
             random_R, random_tr = compute_random_augmentation(
                 atom_coords.shape[0], device=atom_coords.device, dtype=atom_coords.dtype
             )
@@ -461,6 +471,7 @@ class AtomDiffusion(Module):
                                 atom_coords_denoised,
                                 network_condition_kwargs["feats"],
                                 parameters,
+                                sample_chunk_size=max_parallel_samples,
                             )
                             energy += parameters["resampling_weight"] * component_energy
                     energy_traj = torch.cat((energy_traj, energy.unsqueeze(1)), dim=1)
@@ -511,6 +522,7 @@ class AtomDiffusion(Module):
                                     atom_coords_denoised + guidance_update,
                                     network_condition_kwargs["feats"],
                                     parameters,
+                                    sample_chunk_size=max_parallel_samples,
                                 )
                         guidance_update -= energy_gradient
                     atom_coords_denoised += guidance_update

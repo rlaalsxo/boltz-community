@@ -1,5 +1,6 @@
 # started from code from https://github.com/lucidrains/alphafold3-pytorch, MIT License, Copyright (c) 2024 Phil Wang
 
+import time
 from functools import partial
 from typing import Optional
 
@@ -25,6 +26,28 @@ def autocast_device_type(device_type: str) -> str:
     from torch.amp.autocast_mode import is_autocast_available
 
     return device_type if is_autocast_available(device_type) else "cpu"
+
+
+def log_cuda_memory(stage: str) -> None:
+    """Print a one-line CUDA memory snapshot so OOMs can be located in the log.
+
+    ``peak`` is the maximum allocated since the previous snapshot (the peak
+    counter is reset on every call), so it is attributable to the work done
+    between the two log lines.
+    """
+    if not torch.cuda.is_available():
+        return
+    gib = 1024**3
+    allocated = torch.cuda.memory_allocated() / gib
+    reserved = torch.cuda.memory_reserved() / gib
+    peak = torch.cuda.max_memory_allocated() / gib
+    torch.cuda.reset_peak_memory_stats()
+    print(
+        f"[boltz-mem] {time.strftime('%H:%M:%S')} {stage}: "
+        f"allocated={allocated:.2f}GiB reserved={reserved:.2f}GiB "
+        f"peak_since_last_log={peak:.2f}GiB",
+        flush=True,
+    )
 
 
 def exists(v):
